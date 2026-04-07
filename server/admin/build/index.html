@@ -73,8 +73,57 @@
       const COMPLETE_TASK_API = `${API_ORIGIN}/administrator/messages/complete-task`;
       const REOPEN_COMPLETED_TASK_API = `${API_ORIGIN}/administrator/messages/reopen-completed-task`;
       const ADMIN_SOCKET_ID = 0;
+      const ADMIN_AUTH_STORAGE_KEY = "assist4web-admin-basic-auth";
       const E2EE_PREFIX = "e2ee:v1:";
       const E2EE_STORAGE_PREFIX = "assist4web-e2ee-passphrase:";
+
+      const getAdminAuthHeader = () => {
+        let cached = localStorage.getItem(ADMIN_AUTH_STORAGE_KEY);
+        if (cached) {
+          return `Basic ${cached}`;
+        }
+
+        const username = window.prompt("Admin username:");
+        if (username == null) {
+          return null;
+        }
+
+        const password = window.prompt("Admin password:");
+        if (password == null) {
+          return null;
+        }
+
+        cached = btoa(`${username}:${password}`);
+        localStorage.setItem(ADMIN_AUTH_STORAGE_KEY, cached);
+        return `Basic ${cached}`;
+      };
+
+      const clearAdminAuthHeader = () => {
+        localStorage.removeItem(ADMIN_AUTH_STORAGE_KEY);
+      };
+
+      const apiFetch = async (url, options = {}) => {
+        const authHeader = getAdminAuthHeader();
+        if (!authHeader) {
+          throw new Error("Admin authentication is required");
+        }
+
+        const mergedHeaders = {
+          ...(options.headers || {}),
+          Authorization: authHeader,
+        };
+
+        const response = await fetch(url, {
+          ...options,
+          headers: mergedHeaders,
+        });
+
+        if (response.status === 401) {
+          clearAdminAuthHeader();
+        }
+
+        return response;
+      };
 
       const getE2EEStorageKey = (userId) => `${E2EE_STORAGE_PREFIX}${String(userId || "default")}`;
 
@@ -232,7 +281,7 @@
         const loadUsers = React.useCallback(async () => {
           setLoadingUsers(true);
           try {
-            const response = await fetch(ADMIN_API);
+            const response = await apiFetch(ADMIN_API);
             const data = await parseResponse(response, "Failed to load users");
             setUsers(data);
           } catch (error) {
@@ -407,7 +456,7 @@
           });
 
           try {
-            const response = await fetch(`${MESSAGE_HISTORY_API}/${user.id}`);
+            const response = await apiFetch(`${MESSAGE_HISTORY_API}/${user.id}`);
             const data = await parseResponse(response, "Failed to load message history");
             const mapped = data.map((row) => ({
               id: row.id,
@@ -499,7 +548,7 @@
           setMessages((prev) => ({ ...prev, table: null }));
 
           try {
-            const response = await fetch(`${DELETE_ARCHIVED_API}/${chatUserId}`, { method: "DELETE" });
+            const response = await apiFetch(`${DELETE_ARCHIVED_API}/${chatUserId}`, { method: "DELETE" });
             const result = await parseResponse(response, "Failed to delete archived messages");
 
             setMessages((prev) => ({
@@ -533,7 +582,7 @@
           setMessages((prev) => ({ ...prev, table: null }));
 
           try {
-            const response = await fetch(`${ARCHIVE_CHAT_API}/${chatUserId}`, { method: "POST" });
+            const response = await apiFetch(`${ARCHIVE_CHAT_API}/${chatUserId}`, { method: "POST" });
             await parseResponse(response, "Failed to archive chat");
 
             setChatHistory([]);
@@ -580,7 +629,7 @@
           setMessages((prev) => ({ ...prev, table: null }));
 
           try {
-            const response = await fetch(`${COMPLETE_TASK_API}/${chatUserId}`, { method: "POST" });
+            const response = await apiFetch(`${COMPLETE_TASK_API}/${chatUserId}`, { method: "POST" });
             const result = await parseResponse(response, "Failed to create completed task message");
 
             if (result?.message) {
@@ -623,7 +672,7 @@
           setMessages((prev) => ({ ...prev, table: null }));
 
           try {
-            const response = await fetch(
+            const response = await apiFetch(
               `${REOPEN_COMPLETED_TASK_API}/${chatUserId}/${entry.id}`,
               { method: "POST" },
             );
@@ -699,7 +748,7 @@
 
           try {
             const payload = normalizePayload(createForm);
-            const response = await fetch(ADMIN_API, {
+            const response = await apiFetch(ADMIN_API, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(payload),
@@ -750,7 +799,7 @@
               }
             });
 
-            const response = await fetch(`${ADMIN_API}/${selectedUser.id}`, {
+            const response = await apiFetch(`${ADMIN_API}/${selectedUser.id}`, {
               method: "PUT",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(payload),
@@ -780,7 +829,7 @@
           setMessages((prev) => ({ ...prev, table: null }));
 
           try {
-            const response = await fetch(`${ADMIN_API}/${user.id}`, { method: "DELETE" });
+            const response = await apiFetch(`${ADMIN_API}/${user.id}`, { method: "DELETE" });
             await parseResponse(response, "Failed to delete user");
 
             if (selectedUser && selectedUser.id === user.id) {
