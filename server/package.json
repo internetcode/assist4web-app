@@ -23,6 +23,6 @@
     "node-cron": "^4.2.1",
     "serve-static": "^2.2.1",
     "socket.io": "^4.8.3",
-    "sqlite3": "4.2.0"
+    "sql.js": "^1.12.0"
   }
 }
