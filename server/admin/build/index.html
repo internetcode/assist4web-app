@@ -1,0 +1,1426 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Assist4Web Admin</title>
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap"
+    />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/icon?family=Material+Icons"
+    />
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        min-height: 100%;
+        font-family: Roboto, sans-serif;
+        background: #f5f7fb;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@emotion/react@11/dist/emotion-react.umd.min.js"></script>
+    <script src="https://unpkg.com/@emotion/styled@11/dist/emotion-styled.umd.min.js"></script>
+    <script src="https://unpkg.com/@mui/material@5/umd/material-ui.development.js"></script>
+    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+    <script src="https://unpkg.com/tweetnacl/nacl-fast.min.js"></script>
+    <script src="https://unpkg.com/tweetnacl-util/nacl-util.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <script type="text/babel">
+      const {
+        Alert,
+        Badge,
+        Box,
+        Button,
+        Card,
+        CardContent,
+        CircularProgress,
+        Container,
+        CssBaseline,
+        IconButton,
+        InputAdornment,
+        Paper,
+        Stack,
+        Table,
+        TableBody,
+        TableCell,
+        TableContainer,
+        TableHead,
+        TableRow,
+        TableSortLabel,
+        TextField,
+        ThemeProvider,
+        Toolbar,
+        Typography,
+        createTheme,
+      } = MaterialUI;
+
+      const API_ORIGIN = "https://api.assist4web.hr";
+      const ADMIN_API = `${API_ORIGIN}/administrator/users`;
+      const MESSAGE_HISTORY_API = `${API_ORIGIN}/administrator/messages/history`;
+      const ARCHIVE_CHAT_API = `${API_ORIGIN}/administrator/messages/archive`;
+      const DELETE_ARCHIVED_API = `${API_ORIGIN}/administrator/messages/archived`;
+      const COMPLETE_TASK_API = `${API_ORIGIN}/administrator/messages/complete-task`;
+      const REOPEN_COMPLETED_TASK_API = `${API_ORIGIN}/administrator/messages/reopen-completed-task`;
+      const ADMIN_SOCKET_ID = 0;
+      const E2EE_PREFIX = "e2ee:v1:";
+      const E2EE_STORAGE_PREFIX = "assist4web-e2ee-passphrase:";
+
+      const getE2EEStorageKey = (userId) => `${E2EE_STORAGE_PREFIX}${String(userId || "default")}`;
+
+      const deriveE2EEKey = (passphrase, userId) => {
+        const source = `${String(passphrase)}:${String(userId)}`;
+        const sourceBytes = nacl.util.decodeUTF8(source);
+        const hash = nacl.hash(sourceBytes);
+        return hash.slice(0, nacl.secretbox.keyLength);
+      };
+
+      const isE2EEPayload = (value) =>
+        typeof value === "string" && value.startsWith(E2EE_PREFIX);
+
+      const encryptE2EE = (value, passphrase, userId) => {
+        const text = String(value || "");
+        if (!passphrase) {
+          return text;
+        }
+
+        const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
+        const key = deriveE2EEKey(passphrase, userId);
+        const messageBytes = nacl.util.decodeUTF8(text);
+        const encrypted = nacl.secretbox(messageBytes, nonce, key);
+        return `${E2EE_PREFIX}${nacl.util.encodeBase64(nonce)}:${nacl.util.encodeBase64(encrypted)}`;
+      };
+
+      const decryptE2EE = (value, passphrase, userId) => {
+        const text = String(value || "");
+        if (!isE2EEPayload(text)) {
+          return text;
+        }
+
+        if (!passphrase) {
+          return "[Encrypted message. Set E2EE key to read.]";
+        }
+
+        try {
+          const payload = text.slice(E2EE_PREFIX.length);
+          const [nonceBase64, cipherBase64] = payload.split(":");
+          if (!nonceBase64 || !cipherBase64) {
+            return "[Encrypted message. Invalid payload.]";
+          }
+
+          const nonce = nacl.util.decodeBase64(nonceBase64);
+          const cipher = nacl.util.decodeBase64(cipherBase64);
+          const key = deriveE2EEKey(passphrase, userId);
+          const opened = nacl.secretbox.open(cipher, nonce, key);
+
+          if (!opened) {
+            return "[Encrypted message. Wrong key.]";
+          }
+
+          return nacl.util.encodeUTF8(opened);
+        } catch (_error) {
+          return "[Encrypted message. Unable to decrypt.]";
+        }
+      };
+
+      const initialCreate = {
+        name: "",
+        company: "",
+        email: "",
+        password: "",
+        phone: "",
+        notes: "",
+      };
+
+      const initialEdit = {
+        name: "",
+        company: "",
+        email: "",
+        password: "",
+        phone: "",
+        notes: "",
+      };
+
+      const parseResponse = async (response, defaultErrorMessage) => {
+        const hasJson = response.headers.get("content-type")?.includes("application/json");
+        const payload = hasJson ? await response.json() : null;
+
+        if (!response.ok) {
+          throw new Error(payload?.error || defaultErrorMessage);
+        }
+
+        return payload;
+      };
+
+      const formatMessageTimestamp = (timestamp) =>
+        new Date(timestamp).toLocaleString([], {
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        });
+
+      const getDayKey = (timestamp) => {
+        const date = new Date(timestamp);
+        return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+      };
+
+      const getDateSeparatorLabel = (timestamp) => {
+        const date = new Date(timestamp);
+        const today = new Date();
+        const yesterday = new Date();
+        yesterday.setDate(today.getDate() - 1);
+
+        if (getDayKey(timestamp) === getDayKey(today.getTime())) {
+          return "Today";
+        }
+
+        if (getDayKey(timestamp) === getDayKey(yesterday.getTime())) {
+          return "Yesterday";
+        }
+
+        return date.toLocaleDateString([], {
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+        });
+      };
+
+      function AdminApp() {
+        const [users, setUsers] = React.useState([]);
+        const [loadingUsers, setLoadingUsers] = React.useState(true);
+        const [createForm, setCreateForm] = React.useState(initialCreate);
+        const [editForm, setEditForm] = React.useState(initialEdit);
+        const [selectedUser, setSelectedUser] = React.useState(null);
+        const [createPasswordVisible, setCreatePasswordVisible] = React.useState(false);
+        const [editPasswordVisible, setEditPasswordVisible] = React.useState(false);
+        const [searchQuery, setSearchQuery] = React.useState("");
+        const [sortConfig, setSortConfig] = React.useState({ key: "name", direction: "asc" });
+        const [busy, setBusy] = React.useState({ create: false, save: false, delete: false });
+        const [messages, setMessages] = React.useState({
+          create: null,
+          edit: null,
+          table: null,
+        });
+        const [chatUserId, setChatUserId] = React.useState(null);
+        const [chatHistory, setChatHistory] = React.useState([]);
+        const [chatInput, setChatInput] = React.useState("");
+        const [chatE2EEPassphrase, setChatE2EEPassphrase] = React.useState("");
+        const [chatE2EEDraft, setChatE2EEDraft] = React.useState("");
+        const [chatLoading, setChatLoading] = React.useState(false);
+        const [chatDeleting, setChatDeleting] = React.useState(false);
+        const [chatSending, setChatSending] = React.useState(false);
+        const [chatCompleting, setChatCompleting] = React.useState(false);
+        const [chatReopening, setChatReopening] = React.useState(false);
+        const [unreadByUser, setUnreadByUser] = React.useState({});
+        const chatUserIdRef = React.useRef(null);
+        const chatE2EEPassphraseRef = React.useRef("");
+        const chatSocketRef = React.useRef(null);
+
+        const loadUsers = React.useCallback(async () => {
+          setLoadingUsers(true);
+          try {
+            const response = await fetch(ADMIN_API);
+            const data = await parseResponse(response, "Failed to load users");
+            setUsers(data);
+          } catch (error) {
+            setMessages((prev) => ({
+              ...prev,
+              table: { type: "error", text: error.message },
+            }));
+          } finally {
+            setLoadingUsers(false);
+          }
+        }, []);
+
+        React.useEffect(() => {
+          loadUsers();
+        }, [loadUsers]);
+
+        React.useEffect(() => {
+          chatUserIdRef.current = chatUserId;
+        }, [chatUserId]);
+
+        React.useEffect(() => {
+          chatE2EEPassphraseRef.current = chatE2EEPassphrase;
+        }, [chatE2EEPassphrase]);
+
+        React.useEffect(() => {
+          const socket = io(API_ORIGIN);
+          chatSocketRef.current = socket;
+
+          // Re-join room on every (re)connect so room membership survives server restarts
+          socket.on("connect", () => {
+            socket.emit("adminJoin");
+          });
+          socket.on("receiveFromUser", ({ message, timestamp, userId }) => {
+            if (Number(chatUserIdRef.current) === Number(userId)) {
+              const decryptedMessage = decryptE2EE(
+                message,
+                chatE2EEPassphraseRef.current,
+                userId,
+              );
+              setChatHistory((prev) => [
+                ...prev,
+                {
+                  id: `user-${timestamp}-${Math.random().toString(16).slice(2)}`,
+                  message: decryptedMessage,
+                  timestamp,
+                  from: "user",
+                },
+              ]);
+              return;
+            }
+
+            setUnreadByUser((prev) => {
+              const key = String(userId);
+              const currentCount = Number(prev[key] || 0);
+              return {
+                ...prev,
+                [key]: currentCount + 1,
+              };
+            });
+          });
+
+          return () => {
+            socket.disconnect();
+          };
+        }, []);
+
+        const handleCreateChange = (event) => {
+          const { name, value } = event.target;
+          setCreateForm((prev) => ({ ...prev, [name]: value }));
+        };
+
+        const handleEditChange = (event) => {
+          const { name, value } = event.target;
+          setEditForm((prev) => ({ ...prev, [name]: value }));
+        };
+
+        const normalizePayload = (payload) => {
+          const output = { ...payload };
+          Object.keys(output).forEach((key) => {
+            if (output[key] === "") {
+              delete output[key];
+            }
+          });
+          return output;
+        };
+
+        const handleSort = (key) => {
+          setSortConfig((prev) => {
+            if (prev.key === key) {
+              return {
+                key,
+                direction: prev.direction === "asc" ? "desc" : "asc",
+              };
+            }
+
+            return { key, direction: "asc" };
+          });
+        };
+
+        const displayedUsers = React.useMemo(() => {
+          const normalizedQuery = searchQuery.trim().toLowerCase();
+
+          const filteredUsers = users.filter((user) => {
+            if (!normalizedQuery) {
+              return true;
+            }
+
+            const haystack = [user.name, user.company, user.email]
+              .map((value) => String(value || "").toLowerCase())
+              .join(" ");
+
+            return haystack.includes(normalizedQuery);
+          });
+
+          const sortedUsers = [...filteredUsers].sort((a, b) => {
+            const left = String(a[sortConfig.key] || "").toLowerCase();
+            const right = String(b[sortConfig.key] || "").toLowerCase();
+
+            if (left < right) {
+              return sortConfig.direction === "asc" ? -1 : 1;
+            }
+
+            if (left > right) {
+              return sortConfig.direction === "asc" ? 1 : -1;
+            }
+
+            return 0;
+          });
+
+          return sortedUsers;
+        }, [users, searchQuery, sortConfig]);
+
+        const openEdit = (user) => {
+          setSelectedUser(user);
+          setEditForm({
+            name: user.name || "",
+            company: user.company || "",
+            email: user.email || "",
+            password: "",
+            phone: user.phone || "",
+            notes: user.notes || "",
+          });
+          setEditPasswordVisible(false);
+          setMessages((prev) => ({ ...prev, edit: null }));
+        };
+
+        const closeEdit = () => {
+          setSelectedUser(null);
+          setEditForm(initialEdit);
+          setEditPasswordVisible(false);
+          setMessages((prev) => ({ ...prev, edit: null }));
+        };
+
+        const openChat = async (user) => {
+          setChatUserId(user.id);
+          setChatInput("");
+          setChatLoading(true);
+          const savedPassphrase =
+            localStorage.getItem(getE2EEStorageKey(user.id)) || "";
+          setChatE2EEPassphrase(savedPassphrase);
+          setChatE2EEDraft(savedPassphrase);
+          setUnreadByUser((prev) => {
+            const key = String(user.id);
+
+            if (!prev[key]) {
+              return prev;
+            }
+
+            const next = { ...prev };
+            delete next[key];
+            return next;
+          });
+
+          try {
+            const response = await fetch(`${MESSAGE_HISTORY_API}/${user.id}`);
+            const data = await parseResponse(response, "Failed to load message history");
+            const mapped = data.map((row) => ({
+              id: row.id,
+              message: decryptE2EE(row.message, savedPassphrase, user.id),
+              timestamp: row.timestamp,
+              from: Number(row.fromUserId) === ADMIN_SOCKET_ID ? "admin" : "user",
+            }));
+            setChatHistory(mapped);
+          } catch (error) {
+            setChatHistory([]);
+            setMessages((prev) => ({
+              ...prev,
+              table: { type: "error", text: error.message },
+            }));
+          } finally {
+            setChatLoading(false);
+          }
+        };
+
+        const sendChatMessage = async () => {
+          const text = chatInput.trim();
+          if (!text || !chatUserId || !chatSocketRef.current) {
+            return;
+          }
+
+          const timestamp = Date.now();
+          const encryptedMessage = encryptE2EE(
+            text,
+            chatE2EEPassphraseRef.current,
+            chatUserId,
+          );
+          setChatSending(true);
+
+          try {
+            chatSocketRef.current.emit("sendToUser", {
+              message: encryptedMessage,
+              timestamp,
+              userId: Number(chatUserId),
+              adminId: ADMIN_SOCKET_ID,
+            });
+
+            setChatHistory((prev) => [
+              ...prev,
+              {
+                id: `admin-${timestamp}`,
+                message: text,
+                timestamp,
+                from: "admin",
+              },
+            ]);
+            setChatInput("");
+          } finally {
+            setChatSending(false);
+          }
+        };
+
+        const saveChatE2EEPassphrase = () => {
+          if (!chatUserId) {
+            return;
+          }
+
+          const normalized = String(chatE2EEDraft || "").trim();
+          const storageKey = getE2EEStorageKey(chatUserId);
+
+          if (!normalized) {
+            localStorage.removeItem(storageKey);
+            setChatE2EEPassphrase("");
+            return;
+          }
+
+          localStorage.setItem(storageKey, normalized);
+          setChatE2EEPassphrase(normalized);
+        };
+
+        const deleteArchivedChat = async () => {
+          if (!chatUserId || !activeChatUser) {
+            return;
+          }
+
+          const confirmed = window.confirm(
+            `Permanently delete all archived messages for ${activeChatUser.name}? This cannot be undone.`,
+          );
+
+          if (!confirmed) {
+            return;
+          }
+
+          setChatDeleting(true);
+          setMessages((prev) => ({ ...prev, table: null }));
+
+          try {
+            const response = await fetch(`${DELETE_ARCHIVED_API}/${chatUserId}`, { method: "DELETE" });
+            const result = await parseResponse(response, "Failed to delete archived messages");
+
+            setMessages((prev) => ({
+              ...prev,
+              table: { type: "success", text: `Deleted ${result.deletedMessages || 0} archived messages for ${activeChatUser.name}.` },
+            }));
+          } catch (error) {
+            setMessages((prev) => ({
+              ...prev,
+              table: { type: "error", text: error.message },
+            }));
+          } finally {
+            setChatDeleting(false);
+          }
+        };
+
+        const archiveChat = async () => {
+          if (!chatUserId || !activeChatUser) {
+            return;
+          }
+
+          const confirmed = window.confirm(
+            `Archive chat for ${activeChatUser.name}? Current chat history will be hidden for admin until new messages arrive.`,
+          );
+
+          if (!confirmed) {
+            return;
+          }
+
+          setChatLoading(true);
+          setMessages((prev) => ({ ...prev, table: null }));
+
+          try {
+            const response = await fetch(`${ARCHIVE_CHAT_API}/${chatUserId}`, { method: "POST" });
+            await parseResponse(response, "Failed to archive chat");
+
+            setChatHistory([]);
+            setChatInput("");
+            setUnreadByUser((prev) => {
+              const key = String(chatUserId);
+
+              if (!prev[key]) {
+                return prev;
+              }
+
+              const next = { ...prev };
+              delete next[key];
+              return next;
+            });
+            setMessages((prev) => ({
+              ...prev,
+              table: { type: "success", text: `Chat archived for ${activeChatUser.name}.` },
+            }));
+          } catch (error) {
+            setMessages((prev) => ({
+              ...prev,
+              table: { type: "error", text: error.message },
+            }));
+          } finally {
+            setChatLoading(false);
+          }
+        };
+
+        const completeTaskChat = async () => {
+          if (!chatUserId || !activeChatUser) {
+            return;
+          }
+
+          const confirmed = window.confirm(
+            `Create a grouped 'Completed Task' comment for ${activeChatUser.name}?`,
+          );
+
+          if (!confirmed) {
+            return;
+          }
+
+          setChatCompleting(true);
+          setMessages((prev) => ({ ...prev, table: null }));
+
+          try {
+            const response = await fetch(`${COMPLETE_TASK_API}/${chatUserId}`, { method: "POST" });
+            const result = await parseResponse(response, "Failed to create completed task message");
+
+            if (result?.message) {
+              setChatHistory([
+                {
+                  id: result.message.id,
+                  message: result.message.message,
+                  timestamp: result.message.timestamp,
+                  from: "admin",
+                },
+              ]);
+            }
+
+            setMessages((prev) => ({
+              ...prev,
+              table: {
+                type: "success",
+                text: `Completed Task comment created from ${result.groupedMessages || 0} messages.`,
+              },
+            }));
+          } catch (error) {
+            setMessages((prev) => ({
+              ...prev,
+              table: { type: "error", text: error.message },
+            }));
+          } finally {
+            setChatCompleting(false);
+          }
+        };
+
+        const isCompletedTaskEntry = (entry) =>
+          entry.from === "admin" && /^completed task/i.test(String(entry.message || ""));
+
+        const reopenCompletedTask = async (entry) => {
+          if (!chatUserId || !entry?.id || !isCompletedTaskEntry(entry)) {
+            return;
+          }
+
+          setChatReopening(true);
+          setMessages((prev) => ({ ...prev, table: null }));
+
+          try {
+            const response = await fetch(
+              `${REOPEN_COMPLETED_TASK_API}/${chatUserId}/${entry.id}`,
+              { method: "POST" },
+            );
+            const result = await parseResponse(response, "Failed to reopen Completed Task messages");
+
+            const restored = (result.messages || []).map((row) => ({
+              id: row.id,
+              message: decryptE2EE(row.message, chatE2EEPassphraseRef.current, chatUserId),
+              timestamp: row.timestamp,
+              from: Number(row.fromUserId) === ADMIN_SOCKET_ID ? "admin" : "user",
+            }));
+
+            setChatHistory(restored);
+            setMessages((prev) => ({
+              ...prev,
+              table: { type: "success", text: "Completed Task messages reopened." },
+            }));
+          } catch (error) {
+            setMessages((prev) => ({
+              ...prev,
+              table: { type: "error", text: error.message },
+            }));
+          } finally {
+            setChatReopening(false);
+          }
+        };
+
+        const chatItems = React.useMemo(() => {
+          const orderedChatHistory = [...chatHistory].sort((a, b) => {
+            const aTimestamp = Number(a.timestamp) || 0;
+            const bTimestamp = Number(b.timestamp) || 0;
+
+            if (aTimestamp !== bTimestamp) {
+              return aTimestamp - bTimestamp;
+            }
+
+            return String(a.id).localeCompare(String(b.id));
+          });
+
+          let previousDayKey = null;
+
+          return orderedChatHistory.reduce((accumulator, entry, index) => {
+            const dayKey = getDayKey(entry.timestamp);
+
+            if (dayKey !== previousDayKey) {
+              accumulator.push({
+                type: "separator",
+                id: `separator-${dayKey}-${index}`,
+                label: getDateSeparatorLabel(entry.timestamp),
+              });
+              previousDayKey = dayKey;
+            }
+
+            accumulator.push({
+              type: "message",
+              id: `message-${entry.id}`,
+              entry,
+            });
+
+            return accumulator;
+          }, []);
+        }, [chatHistory]);
+
+        const activeChatUser = React.useMemo(
+          () => users.find((user) => Number(user.id) === Number(chatUserId)) || null,
+          [users, chatUserId],
+        );
+
+        const submitCreate = async (event) => {
+          event.preventDefault();
+          setBusy((prev) => ({ ...prev, create: true }));
+          setMessages((prev) => ({ ...prev, create: null }));
+
+          try {
+            const payload = normalizePayload(createForm);
+            const response = await fetch(ADMIN_API, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            const result = await parseResponse(response, "Failed to create user");
+
+            setCreateForm(initialCreate);
+            setCreatePasswordVisible(false);
+            setMessages((prev) => ({
+              ...prev,
+              create: {
+                type: "success",
+                text: `User created. Generated password: ${result.password}`,
+              },
+              table: null,
+            }));
+            await loadUsers();
+          } catch (error) {
+            setMessages((prev) => ({ ...prev, create: { type: "error", text: error.message } }));
+          } finally {
+            setBusy((prev) => ({ ...prev, create: false }));
+          }
+        };
+
+        const submitEdit = async (event) => {
+          event.preventDefault();
+
+          if (!selectedUser) {
+            return;
+          }
+
+          setBusy((prev) => ({ ...prev, save: true }));
+          setMessages((prev) => ({ ...prev, edit: null }));
+
+          try {
+            const payload = {
+              name: editForm.name,
+              company: editForm.company,
+              email: editForm.email,
+              password: editForm.password,
+              phone: editForm.phone,
+              notes: editForm.notes,
+            };
+
+            Object.keys(payload).forEach((key) => {
+              if (payload[key] === "") {
+                payload[key] = null;
+              }
+            });
+
+            const response = await fetch(`${ADMIN_API}/${selectedUser.id}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+
+            await parseResponse(response, "Failed to update user");
+
+            setMessages((prev) => ({
+              ...prev,
+              edit: { type: "success", text: "User updated." },
+              table: null,
+            }));
+            await loadUsers();
+          } catch (error) {
+            setMessages((prev) => ({ ...prev, edit: { type: "error", text: error.message } }));
+          } finally {
+            setBusy((prev) => ({ ...prev, save: false }));
+          }
+        };
+
+        const deleteUser = async (user) => {
+          if (!window.confirm(`Delete ${user.name}? This cannot be undone.`)) {
+            return;
+          }
+
+          setBusy((prev) => ({ ...prev, delete: true }));
+          setMessages((prev) => ({ ...prev, table: null }));
+
+          try {
+            const response = await fetch(`${ADMIN_API}/${user.id}`, { method: "DELETE" });
+            await parseResponse(response, "Failed to delete user");
+
+            if (selectedUser && selectedUser.id === user.id) {
+              closeEdit();
+            }
+
+            if (Number(chatUserId) === Number(user.id)) {
+              setChatUserId(null);
+              setChatHistory([]);
+              setChatInput("");
+            }
+
+            setMessages((prev) => ({
+              ...prev,
+              table: { type: "success", text: `${user.name} deleted.` },
+            }));
+            await loadUsers();
+          } catch (error) {
+            setMessages((prev) => ({
+              ...prev,
+              table: { type: "error", text: error.message },
+            }));
+          } finally {
+            setBusy((prev) => ({ ...prev, delete: false }));
+          }
+        };
+
+        const theme = createTheme({
+          palette: {
+            primary: { main: "#1565c0" },
+            secondary: { main: "#455a64" },
+            background: { default: "#f5f7fb" },
+          },
+          typography: {
+            fontSize: 13.3,
+          },
+          shape: { borderRadius: 12 },
+          components: {
+            MuiOutlinedInput: {
+              styleOverrides: {
+                root: {
+                  backgroundColor: "#fcfff9",
+                },
+                input: {
+                  padding: "15.5px 13px",
+                },
+                inputMultiline: {
+                  padding: "15px 13px",
+                },
+              },
+            },
+          },
+        });
+
+        return (
+          <ThemeProvider theme={theme}>
+            <CssBaseline />
+            <Box sx={{ py: 4 }}>
+              <Container maxWidth="xl">
+                <Paper elevation={2} sx={{ p: 3, mb: 3 }}>
+                  <Typography variant="h4" gutterBottom>
+                    Assist4Web Admin
+                  </Typography>
+                  <Typography color="text.secondary">
+                    Material UI admin panel for creating users and maintaining optional admin-only fields.
+                  </Typography>
+                </Paper>
+
+                <Stack spacing={3}>
+                  <Card>
+                    <CardContent>
+                      <Typography variant="h6" gutterBottom>
+                        Create user
+                      </Typography>
+                      <Typography color="text.secondary" sx={{ mb: 2 }}>
+                        Password is optional. Leave blank to auto-generate.
+                      </Typography>
+
+                      <Box component="form" onSubmit={submitCreate}>
+                        <Stack spacing={2}>
+                          <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+                            <TextField
+                              fullWidth
+                              required
+                              label="Name"
+                              name="name"
+                              value={createForm.name}
+                              onChange={handleCreateChange}
+                            />
+                            <TextField
+                              fullWidth
+                              required
+                              label="Company"
+                              name="company"
+                              value={createForm.company}
+                              onChange={handleCreateChange}
+                            />
+                          </Stack>
+
+                          <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+                            <TextField
+                              fullWidth
+                              required
+                              label="Email"
+                              type="email"
+                              name="email"
+                              value={createForm.email}
+                              onChange={handleCreateChange}
+                            />
+                            <TextField
+                              fullWidth
+                              label="Password"
+                              name="password"
+                              type={createPasswordVisible ? "text" : "password"}
+                              value={createForm.password}
+                              onChange={handleCreateChange}
+                              autoComplete="new-password"
+                              InputProps={{
+                                endAdornment: (
+                                  <InputAdornment position="end">
+                                    <IconButton
+                                      edge="end"
+                                      onClick={() => setCreatePasswordVisible((prev) => !prev)}
+                                      aria-label={createPasswordVisible ? "Hide password" : "Show password"}
+                                    >
+                                      <span className="material-icons">
+                                        {createPasswordVisible ? "visibility_off" : "visibility"}
+                                      </span>
+                                    </IconButton>
+                                  </InputAdornment>
+                                ),
+                              }}
+                            />
+                          </Stack>
+
+                          <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+                            <TextField
+                              fullWidth
+                              label="Phone"
+                              name="phone"
+                              value={createForm.phone}
+                              onChange={handleCreateChange}
+                            />
+                            <TextField
+                              fullWidth
+                              multiline
+                              minRows={3}
+                              label="Notes"
+                              name="notes"
+                              value={createForm.notes}
+                              onChange={handleCreateChange}
+                            />
+                          </Stack>
+
+                          <Stack direction="row" spacing={2} alignItems="center">
+                            <Button
+                              variant="outlined"
+                              type="submit"
+                              disabled={busy.create}
+                              endIcon={<span className="material-icons">add</span>}
+                            >
+                              {busy.create ? "Creating..." : "Create user"}
+                            </Button>
+                            {messages.create && (
+                              <Alert severity={messages.create.type} sx={{ flex: 1 }}>
+                                {messages.create.text}
+                              </Alert>
+                            )}
+                          </Stack>
+                        </Stack>
+                      </Box>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardContent>
+                      <Typography variant="h6" gutterBottom>
+                        Existing users
+                      </Typography>
+                      <Typography color="text.secondary" sx={{ mb: 2 }}>
+                        Each user is displayed in a full table row with clear columns.
+                      </Typography>
+
+                      <TextField
+                        label="Quick search"
+                        placeholder="Filter by name, company, or email"
+                        value={searchQuery}
+                        onChange={(event) => setSearchQuery(event.target.value)}
+                        InputProps={{
+                          endAdornment: searchQuery ? (
+                            <InputAdornment position="end">
+                              <IconButton
+                                edge="end"
+                                aria-label="Clear search"
+                                onClick={() => setSearchQuery("")}
+                              >
+                                <span className="material-icons">close</span>
+                              </IconButton>
+                            </InputAdornment>
+                          ) : null,
+                        }}
+                        sx={{ mb: 2, width: { xs: "100%", md: "25%" }, minWidth: { md: 240 } }}
+                      />
+
+                      <TableContainer component={Paper} variant="outlined">
+                        <Table size="small">
+                          <TableHead>
+                            <TableRow>
+                              <TableCell sortDirection={sortConfig.key === "name" ? sortConfig.direction : false}>
+                                <TableSortLabel
+                                  active={sortConfig.key === "name"}
+                                  direction={sortConfig.key === "name" ? sortConfig.direction : "asc"}
+                                  onClick={() => handleSort("name")}
+                                >
+                                  Name
+                                </TableSortLabel>
+                              </TableCell>
+                              <TableCell sortDirection={sortConfig.key === "company" ? sortConfig.direction : false}>
+                                <TableSortLabel
+                                  active={sortConfig.key === "company"}
+                                  direction={sortConfig.key === "company" ? sortConfig.direction : "asc"}
+                                  onClick={() => handleSort("company")}
+                                >
+                                  Company
+                                </TableSortLabel>
+                              </TableCell>
+                              <TableCell sortDirection={sortConfig.key === "email" ? sortConfig.direction : false}>
+                                <TableSortLabel
+                                  active={sortConfig.key === "email"}
+                                  direction={sortConfig.key === "email" ? sortConfig.direction : "asc"}
+                                  onClick={() => handleSort("email")}
+                                >
+                                  Email
+                                </TableSortLabel>
+                              </TableCell>
+                              <TableCell sortDirection={sortConfig.key === "phone" ? sortConfig.direction : false}>
+                                <TableSortLabel
+                                  active={sortConfig.key === "phone"}
+                                  direction={sortConfig.key === "phone" ? sortConfig.direction : "asc"}
+                                  onClick={() => handleSort("phone")}
+                                >
+                                  Phone
+                                </TableSortLabel>
+                              </TableCell>
+                              <TableCell sortDirection={sortConfig.key === "notes" ? sortConfig.direction : false}>
+                                <TableSortLabel
+                                  active={sortConfig.key === "notes"}
+                                  direction={sortConfig.key === "notes" ? sortConfig.direction : "asc"}
+                                  onClick={() => handleSort("notes")}
+                                >
+                                  Notes
+                                </TableSortLabel>
+                              </TableCell>
+                              <TableCell align="right">Actions</TableCell>
+                            </TableRow>
+                          </TableHead>
+                          <TableBody>
+                            {loadingUsers ? (
+                              <TableRow>
+                                <TableCell colSpan={6}>
+                                  <Stack direction="row" spacing={1} alignItems="center">
+                                    <CircularProgress size={16} />
+                                    <Typography variant="body2">Loading users...</Typography>
+                                  </Stack>
+                                </TableCell>
+                              </TableRow>
+                            ) : displayedUsers.length === 0 ? (
+                              <TableRow>
+                                <TableCell colSpan={6}>
+                                  {searchQuery.trim() ? "No users match the current filter." : "No users yet."}
+                                </TableCell>
+                              </TableRow>
+                            ) : (
+                              displayedUsers.map((user) => (
+                                <TableRow key={user.id} hover>
+                                  <TableCell>{user.name}</TableCell>
+                                  <TableCell>{user.company}</TableCell>
+                                  <TableCell>{user.email}</TableCell>
+                                  <TableCell>{user.phone || ""}</TableCell>
+                                  <TableCell>{user.notes || ""}</TableCell>
+                                  <TableCell align="right">
+                                    <Stack direction="row" spacing={1} justifyContent="flex-end">
+                                      <Button
+                                        variant="outlined"
+                                        size="small"
+                                        endIcon={
+                                          <Badge
+                                            color="error"
+                                            badgeContent={unreadByUser[String(user.id)] || 0}
+                                            invisible={!unreadByUser[String(user.id)]}
+                                          >
+                                            <span className="material-icons">chat</span>
+                                          </Badge>
+                                        }
+                                        onClick={() => openChat(user)}
+                                      >
+                                        Chat
+                                      </Button>
+                                      <Button
+                                        variant="outlined"
+                                        size="small"
+                                        endIcon={<span className="material-icons">edit</span>}
+                                        onClick={() => openEdit(user)}
+                                      >
+                                        Edit
+                                      </Button>
+                                      <Button
+                                        variant="outlined"
+                                        color="error"
+                                        size="small"
+                                        disabled={busy.delete}
+                                        endIcon={<span className="material-icons">delete</span>}
+                                        onClick={() => deleteUser(user)}
+                                      >
+                                        Delete
+                                      </Button>
+                                    </Stack>
+                                  </TableCell>
+                                </TableRow>
+                              ))
+                            )}
+                          </TableBody>
+                        </Table>
+                      </TableContainer>
+
+                      {messages.table && (
+                        <Alert severity={messages.table.type} sx={{ mt: 2 }}>
+                          {messages.table.text}
+                        </Alert>
+                      )}
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardContent>
+                      <Stack
+                        direction={{ xs: "column", sm: "row" }}
+                        justifyContent="space-between"
+                        alignItems={{ xs: "flex-start", sm: "center" }}
+                        spacing={1}
+                        sx={{ mb: 2 }}
+                      >
+                        <Typography variant="h6">User chat</Typography>
+                        <Typography color="text.secondary">
+                          {activeChatUser
+                            ? `Talking to ${activeChatUser.name} (${activeChatUser.email})`
+                            : "Pick a user from the table and click Chat."}
+                        </Typography>
+                      </Stack>
+
+                      <Paper
+                        variant="outlined"
+                        sx={{
+                          p: 2,
+                          mb: 2,
+                          minHeight: 280,
+                          maxHeight: 360,
+                          overflowY: "auto",
+                          bgcolor: "#fcfff9",
+                        }}
+                      >
+                        {chatLoading ? (
+                          <Stack direction="row" spacing={1} alignItems="center">
+                            <CircularProgress size={16} />
+                            <Typography variant="body2">Loading messages...</Typography>
+                          </Stack>
+                        ) : !activeChatUser ? (
+                          <Typography color="text.secondary">No chat selected.</Typography>
+                        ) : chatHistory.length === 0 ? (
+                          <Typography color="text.secondary">No messages yet.</Typography>
+                        ) : (
+                          <Stack spacing={1.5}>
+                            {chatItems.map((item) => {
+                              if (item.type === "separator") {
+                                return (
+                                  <Box key={item.id} sx={{ alignSelf: "center", py: 0.5 }}>
+                                    <Typography
+                                      variant="caption"
+                                      sx={{ color: "text.secondary", fontWeight: 700 }}
+                                    >
+                                      {`---- ${item.label} ----`}
+                                    </Typography>
+                                  </Box>
+                                );
+                              }
+
+                              const entry = item.entry;
+                              return (
+                                <Box
+                                  key={item.id}
+                                  onClick={() => {
+                                    if (isCompletedTaskEntry(entry) && !chatReopening) {
+                                      reopenCompletedTask(entry);
+                                    }
+                                  }}
+                                  sx={{
+                                    alignSelf: entry.from === "admin" ? "flex-end" : "flex-start",
+                                    maxWidth: "80%",
+                                    px: 1.5,
+                                    py: 1,
+                                    borderRadius: 2,
+                                    bgcolor: entry.from === "admin" ? "primary.main" : "grey.100",
+                                    color: entry.from === "admin" ? "common.white" : "text.primary",
+                                    cursor: isCompletedTaskEntry(entry) ? "pointer" : "default",
+                                    border: isCompletedTaskEntry(entry) ? "1px solid rgba(255,255,255,0.35)" : "none",
+                                  }}
+                                >
+                                  <Typography variant="body2">{entry.message}</Typography>
+                                  {isCompletedTaskEntry(entry) && (
+                                    <Typography variant="caption" sx={{ display: "block", opacity: 0.85 }}>
+                                      Click to reopen task
+                                    </Typography>
+                                  )}
+                                  <Typography
+                                    variant="caption"
+                                    sx={{
+                                      display: "block",
+                                      opacity: 0.8,
+                                      textAlign: "right",
+                                    }}
+                                  >
+                                    {formatMessageTimestamp(entry.timestamp)}
+                                  </Typography>
+                                </Box>
+                              );
+                            })}
+                          </Stack>
+                        )}
+                      </Paper>
+
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                        <TextField
+                          fullWidth
+                          label="E2EE shared key (optional)"
+                          placeholder={activeChatUser ? "Set shared key with user" : "Select user first"}
+                          type="password"
+                          value={chatE2EEDraft}
+                          onChange={(event) => setChatE2EEDraft(event.target.value)}
+                          disabled={!activeChatUser}
+                        />
+                        <Button
+                          variant="outlined"
+                          disabled={!activeChatUser}
+                          onClick={saveChatE2EEPassphrase}
+                        >
+                          Save Key
+                        </Button>
+                      </Stack>
+
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: 1 }}>
+                        <TextField
+                          fullWidth
+                          label="Message"
+                          placeholder={activeChatUser ? "Type reply to user" : "Select user first"}
+                          value={chatInput}
+                          onChange={(event) => setChatInput(event.target.value)}
+                          disabled={!activeChatUser || chatSending}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" && !event.shiftKey) {
+                              event.preventDefault();
+                              sendChatMessage();
+                            }
+                          }}
+                        />
+                        <Button
+                          variant="outlined"
+                          endIcon={<span className="material-icons">send</span>}
+                          disabled={!activeChatUser || chatSending || !chatInput.trim()}
+                          onClick={sendChatMessage}
+                        >
+                          {chatSending ? "Sending..." : "Send"}
+                        </Button>
+                        <Button
+                          variant="outlined"
+                          color="error"
+                          endIcon={<span className="material-icons">delete_forever</span>}
+                          disabled={!activeChatUser || chatDeleting}
+                          onClick={deleteArchivedChat}
+                        >
+                          {chatDeleting ? "Deleting..." : "Delete archived"}
+                        </Button>
+                        <Button
+                          variant="outlined"
+                          color="warning"
+                          endIcon={<span className="material-icons">archive</span>}
+                          disabled={!activeChatUser || chatLoading}
+                          onClick={archiveChat}
+                        >
+                          Archive chat
+                        </Button>
+                        <Button
+                          variant="outlined"
+                          color="success"
+                          endIcon={<span className="material-icons">task_alt</span>}
+                          disabled={!activeChatUser || chatLoading || chatCompleting}
+                          onClick={completeTaskChat}
+                        >
+                          {chatCompleting ? "Creating..." : "Completed Task"}
+                        </Button>
+                      </Stack>
+                    </CardContent>
+                  </Card>
+
+                  {selectedUser && (
+                    <Card>
+                      <CardContent>
+                        <Stack
+                          direction={{ xs: "column", sm: "row" }}
+                          justifyContent="space-between"
+                          alignItems={{ xs: "flex-start", sm: "center" }}
+                          spacing={2}
+                          sx={{ mb: 2 }}
+                        >
+                          <Box>
+                            <Typography variant="h6">Edit user</Typography>
+                            <Typography color="text.secondary">
+                              {selectedUser.name} ({selectedUser.email})
+                            </Typography>
+                          </Box>
+                          <Button
+                            variant="outlined"
+                            color="secondary"
+                            onClick={closeEdit}
+                            endIcon={<span className="material-icons">close</span>}
+                          >
+                            Cancel
+                          </Button>
+                        </Stack>
+
+                        <Box component="form" onSubmit={submitEdit}>
+                          <Stack spacing={2}>
+                            <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+                              <TextField
+                                fullWidth
+                                required
+                                label="Name"
+                                name="name"
+                                value={editForm.name}
+                                onChange={handleEditChange}
+                              />
+                              <TextField
+                                fullWidth
+                                required
+                                label="Company"
+                                name="company"
+                                value={editForm.company}
+                                onChange={handleEditChange}
+                              />
+                            </Stack>
+
+                            <TextField
+                              fullWidth
+                              required
+                              label="Email"
+                              name="email"
+                              type="email"
+                              value={editForm.email}
+                              onChange={handleEditChange}
+                            />
+
+                            <TextField
+                              fullWidth
+                              label="New Password"
+                              name="password"
+                              type={editPasswordVisible ? "text" : "password"}
+                              value={editForm.password}
+                              onChange={handleEditChange}
+                              placeholder="Leave blank to keep current password"
+                              autoComplete="new-password"
+                              InputProps={{
+                                endAdornment: (
+                                  <InputAdornment position="end">
+                                    <IconButton
+                                      edge="end"
+                                      onClick={() => setEditPasswordVisible((prev) => !prev)}
+                                      aria-label={editPasswordVisible ? "Hide password" : "Show password"}
+                                    >
+                                      <span className="material-icons">
+                                        {editPasswordVisible ? "visibility_off" : "visibility"}
+                                      </span>
+                                    </IconButton>
+                                  </InputAdornment>
+                                ),
+                              }}
+                            />
+
+                            <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+                              <TextField
+                                fullWidth
+                                label="Phone"
+                                name="phone"
+                                value={editForm.phone}
+                                onChange={handleEditChange}
+                              />
+                              <TextField
+                                fullWidth
+                                multiline
+                                minRows={3}
+                                label="Notes"
+                                name="notes"
+                                value={editForm.notes}
+                                onChange={handleEditChange}
+                              />
+                            </Stack>
+
+                            <Stack direction="row" spacing={2} alignItems="center">
+                              <Button
+                                variant="outlined"
+                                type="submit"
+                                disabled={busy.save}
+                                endIcon={<span className="material-icons">save</span>}
+                              >
+                                {busy.save ? "Saving..." : "Save changes"}
+                              </Button>
+                              <Button
+                                variant="outlined"
+                                color="error"
+                                disabled={busy.delete}
+                                endIcon={<span className="material-icons">delete_forever</span>}
+                                onClick={() => deleteUser(selectedUser)}
+                              >
+                                Delete user
+                              </Button>
+                            </Stack>
+
+                            {messages.edit && <Alert severity={messages.edit.type}>{messages.edit.text}</Alert>}
+                          </Stack>
+                        </Box>
+                      </CardContent>
+                    </Card>
+                  )}
+                </Stack>
+              </Container>
+            </Box>
+          </ThemeProvider>
+        );
+      }
+
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(<AdminApp />);
+    </script>
+  </body>
+</html>
