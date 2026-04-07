@@ -1,5 +1,5 @@
 const LOCAL_EMULATOR_API = 'http://10.0.2.2:3000';
-const PROD_API = 'https://app.assist4web.com';
+const PROD_API = 'https://api.assist4web.hr';
 
 // For production builds this automatically points to your hosted subdomain.
 export const API_BASE_URL = __DEV__ ? LOCAL_EMULATOR_API : PROD_API;
