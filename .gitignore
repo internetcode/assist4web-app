@@ -34,6 +34,7 @@ coverage/
 .cache/
 
 # React Native / Metro / Expo
+mobile/
 mobile/Assist4WebApp/android/build/
 mobile/Assist4WebApp/android/app/build/
 mobile/Assist4WebApp/android/.gradle/
