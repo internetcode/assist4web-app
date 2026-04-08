@@ -1909,8 +1909,13 @@ if (disableWpPolling) {
   checkForNewWebsitePosts();
 }
 
-// Serve admin UI
-app.use("/administrator", requireAdmin, serveStatic(adminUiPath));
+// Serve admin UI static assets (JS, CSS, images, etc.)
+app.use("/administrator", serveStatic(adminUiPath));
+
+// SPA fallback: serve index.html for /administrator and any sub-path not matched above
+app.get(["/administrator", "/administrator/*"], (req, res) => {
+  res.sendFile(path.join(adminUiPath, "index.html"));
+});
 
 app.use((err, req, res, next) => {
   if (err?.message === "Not allowed by CORS") {
