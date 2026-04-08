@@ -9,6 +9,7 @@ server/firebase-service-account.json
 server/firebase-service-account*.json
 server/*service-account*.json
 mobile/Assist4WebApp/android/app/google-services.json
+mobile/Assist4WebApp/android/app/src/main/google-services.json
 mobile/Assist4WebApp/ios/Assist4WebApp/GoogleService-Info.plist
 
 # Logs
